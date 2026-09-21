@@ -21,7 +21,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8937376122:AAEhnyFiFczW-L5xVco5j-9rsjW3RU9j1QY"
+BOT_TOKEN = "8937376122:AAGANyLhdJLZyOZNVr62MaJ-OHxn7Avn6T0"
 ADMIN_ID = 8671410379
 
 CHANNELS = [
@@ -121,6 +121,7 @@ def start_handler(message):
     user_id = message.from_user.id
     register_user(user_id)
 
+    # Admin verification
     if user_id == ADMIN_ID:
         bot.send_message(
             ADMIN_ID,
@@ -129,6 +130,7 @@ def start_handler(message):
         )
         return
 
+    # Normal user file query
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("file_"):
         file_db_id = args[1].replace("file_", "")
@@ -233,7 +235,7 @@ def process_delete_file(message):
 
     cursor.execute("DELETE FROM files WHERE id = ?", (file_id_input,))
     conn.commit()
-    bot.send_message(ADMIN_ID, f"✅ File `{row[0]}` (ID: {file_id_input}) has been deleted successfully.")
+    bot.send_message(ADMIN_ID, f"✅ File `{row[0]}` (ID: {file_id_input}) has been permanently deleted.")
 
 @bot.message_handler(func=lambda msg: msg.text in ["📤 Upload File", "/upl"])
 def upload_prompt(message):
@@ -358,6 +360,7 @@ def list_files(message):
 
     bot.send_message(ADMIN_ID, text)
 
+# ================= BROADCAST ANY CONTENT (TEXT / MEDIA) =================
 @bot.message_handler(func=lambda msg: msg.text in ["📢 Broadcast", "/all"])
 def prompt_broadcast(message):
     if message.from_user.id != ADMIN_ID:
