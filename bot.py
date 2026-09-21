@@ -1,5 +1,23 @@
+import os
 import sqlite3
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telebot import TeleBot, types
+
+# ================= DUMMY WEB SERVER (RENDER & UPTIMEROBOT) =================
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and running!")
+
+def run_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
 BOT_TOKEN = "8937376122:AAEhnyFiFczW-L5xVco5j-9rsjW3RU9j1QY"
@@ -36,7 +54,6 @@ CREATE TABLE IF NOT EXISTS files (
 """)
 conn.commit()
 
-# Temporary upload buffer for admin actions
 upload_cache = {}
 
 # ================= HELPER FUNCTIONS =================
@@ -76,8 +93,7 @@ def start_handler(message):
         if not is_subscribed(user_id):
             bot.send_message(
                 user_id,
-                "⚠️ **Access Denied!**\n\nPehle niche diye gaye sabhi channels ko join karein, fir verify button par click karein:",
-                parse_mode="Markdown",
+                "⚠️ Access Denied!\n\nPehle niche diye gaye sabhi channels ko join karein, fir verify button par click karein:",
                 reply_markup=get_force_sub_markup(file_db_id)
             )
             return
@@ -98,20 +114,20 @@ def deliver_file(user_id, file_db_id):
 
     f_id, f_name, f_type = data
     caption = (
-        f"📁 **File:** `{f_name}`\n\n"
+        f"📁 File: {f_name}\n\n"
         "⚠️ Please download your file as soon as possible. "
         "Due to copyright issues, this file will be deleted within 30 minutes."
         f"{FOOTER_TEXT}"
     )
 
     if f_type == "document":
-        bot.send_document(user_id, f_id, caption=caption, parse_mode="Markdown")
+        bot.send_document(user_id, f_id, caption=caption)
     elif f_type == "video":
-        bot.send_video(user_id, f_id, caption=caption, parse_mode="Markdown")
+        bot.send_video(user_id, f_id, caption=caption)
     elif f_type == "audio":
-        bot.send_audio(user_id, f_id, caption=caption, parse_mode="Markdown")
+        bot.send_audio(user_id, f_id, caption=caption)
     elif f_type == "photo":
-        bot.send_photo(user_id, f_id, caption=caption, parse_mode="Markdown")
+        bot.send_photo(user_id, f_id, caption=caption)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("check_"))
 def verify_subscription(call):
@@ -119,7 +135,11 @@ def verify_subscription(call):
     data = call.data.replace("check_", "")
     
     if is_subscribed(user_id):
-        bot.delete_message(call.message.chat.id, call.message.message_id)
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+
         if data != "home":
             deliver_file(user_id, data)
         else:
@@ -133,13 +153,13 @@ def admin_commands(message):
     if message.from_user.id != ADMIN_ID:
         return
     text = (
-        "🛠 **Admin Command Panel:**\n\n"
-        "• `/upl` - File upload karke direct link generate karein\n"
-        "• `/sel` - Database ki sabhi saved files ki numbered list dekhein\n"
-        "• `/all <message>` - Sabhi registered users ko broadcast message bhejein\n"
-        "• `/com` - Command list aur unka use dekhein"
+        "🛠 Admin Command Panel:\n\n"
+        "• /upl - File upload karke direct link generate karein\n"
+        "• /sel - Database ki sabhi saved files ki numbered list dekhein\n"
+        "• /all <message> - Sabhi registered users ko broadcast message bhejein\n"
+        "• /com - Command list aur unka use dekhein"
     )
-    bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
+    bot.send_message(ADMIN_ID, text)
 
 @bot.message_handler(commands=['all'])
 def broadcast_message(message):
@@ -148,7 +168,7 @@ def broadcast_message(message):
     
     parts = message.text.split(" ", 1)
     if len(parts) < 2:
-        bot.send_message(ADMIN_ID, "⚠️ Format: `/all Message yahan likhein`", parse_mode="Markdown")
+        bot.send_message(ADMIN_ID, "⚠️ Format: /all Message yahan likhein")
         return
 
     broadcast_text = parts[1]
@@ -165,7 +185,7 @@ def broadcast_message(message):
         except Exception:
             failed += 1
 
-    bot.send_message(ADMIN_ID, f"✅ Broadcast done.\nSent: `{sent}`\nFailed: `{failed}`", parse_mode="Markdown")
+    bot.send_message(ADMIN_ID, f"✅ Broadcast done.\nSent: {sent}\nFailed: {failed}")
 
 @bot.message_handler(commands=['sel'])
 def list_files(message):
@@ -179,7 +199,7 @@ def list_files(message):
         bot.send_message(ADMIN_ID, "📂 Database me koi file nahi hai.")
         return
 
-    text = "📁 **Uploaded Files List:**\n\n"
+    text = "📁 Uploaded Files List:\n\n"
     for fid, fname in records:
         text += f"{fid}. {fname}\n"
 
@@ -229,8 +249,7 @@ def process_admin_file(message):
 
     bot.send_message(
         ADMIN_ID,
-        f"File: `{f_name}`\n\nAap kya karna chahte hain?",
-        parse_mode="Markdown",
+        f"File: {f_name}\n\nAap kya karna chahte hain?",
         reply_markup=markup
     )
 
@@ -267,14 +286,14 @@ def handle_file_action(call):
         direct_link = f"https://t.me/{bot_username}?start=file_{db_id}"
 
         response_text = (
-            f"✅ **File Published!**\n\n"
-            f"📁 **Name:** `{cached['file_name']}`\n"
-            f"🔗 **Download Link:** {direct_link}\n\n"
+            f"✅ File Published!\n\n"
+            f"📁 Name: {cached['file_name']}\n"
+            f"🔗 Download Link: {direct_link}\n\n"
             f"⚠️ Please download your file as soon as possible. "
             f"Due to copyright issues, this file will be deleted within 30 minutes."
             f"{FOOTER_TEXT}"
         )
-        bot.edit_message_text(response_text, ADMIN_ID, call.message.message_id, parse_mode="Markdown")
+        bot.edit_message_text(response_text, ADMIN_ID, call.message.message_id)
 
 def rename_file(message):
     if message.from_user.id != ADMIN_ID:
@@ -289,9 +308,10 @@ def rename_file(message):
             types.InlineKeyboardButton("✏️ Edit", callback_data="btn_edit"),
             types.InlineKeyboardButton("❌ Cancel", callback_data="btn_cancel")
         )
-        bot.send_message(ADMIN_ID, f"Updated Name: `{new_name}`\nAb select karein:", parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(ADMIN_ID, f"Updated Name: {new_name}\nAb select karein:", reply_markup=markup)
 
 # ================= RUN BOT =================
 if __name__ == "__main__":
     print("Bot is starting...")
     bot.infinity_polling(skip_pending=True)
+        
