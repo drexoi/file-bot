@@ -21,7 +21,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8937376122:AAGANyLhdJLZyOZNVr62MaJ-OHxn7Avn6T0"
+BOT_TOKEN = "8937376122:AAEQ_sv61t7hGpCAMoRcCHvRYo1d2sbypBk"
 ADMIN_ID = 8671410379
 
 CHANNELS = [
@@ -56,7 +56,6 @@ CREATE TABLE IF NOT EXISTS files (
 )
 """)
 
-# Table to track broadcasted ads so they can be deleted later
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS sent_ads (
     ad_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +64,6 @@ CREATE TABLE IF NOT EXISTS sent_ads (
 )
 """)
 
-# Table to store the currently active ad for new/returning users
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS active_ad (
     id INTEGER PRIMARY KEY,
@@ -74,9 +72,18 @@ CREATE TABLE IF NOT EXISTS active_ad (
     custom_text TEXT
 )
 """)
+
+# Table for persistent auto-deletion tracking
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS pending_deletes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER,
+    message_id INTEGER,
+    delete_at REAL
+)
+""")
 conn.commit()
 
-# In-memory caches for multi-step admin flows
 upload_cache = {}
 ad_cache = {}
 
@@ -97,17 +104,39 @@ def get_admin_keyboard():
     markup.add(btn_info)
     return markup
 
-# ================= AUTO DELETE FUNCTION =================
-def auto_delete_file(chat_id, message_id, delay_seconds=1800):
-    time.sleep(delay_seconds)
-    try:
-        bot.delete_message(chat_id, message_id)
-        bot.send_message(
-            chat_id,
-            "⚠️ Notice: The requested file has been automatically removed to respect copyright policies."
-        )
-    except Exception:
-        pass
+# ================= PERSISTENT 30-MIN AUTO DELETE WORKER =================
+def schedule_auto_delete(chat_id, message_id, delay_seconds=1800):
+    delete_at = time.time() + delay_seconds
+    cursor.execute(
+        "INSERT INTO pending_deletes (chat_id, message_id, delete_at) VALUES (?, ?, ?)",
+        (chat_id, message_id, delete_at)
+    )
+    conn.commit()
+
+def persistent_delete_worker():
+    while True:
+        try:
+            now = time.time()
+            cursor.execute("SELECT id, chat_id, message_id FROM pending_deletes WHERE delete_at <= ?", (now,))
+            due_messages = cursor.fetchall()
+            
+            for row_id, cid, mid in due_messages:
+                try:
+                    bot.delete_message(cid, mid)
+                    bot.send_message(
+                        cid,
+                        "⚠️ Notice: The requested file has been automatically removed to respect copyright policies."
+                    )
+                except Exception:
+                    pass
+                
+                cursor.execute("DELETE FROM pending_deletes WHERE id = ?", (row_id,))
+                conn.commit()
+        except Exception:
+            pass
+        time.sleep(10)
+
+threading.Thread(target=persistent_delete_worker, daemon=True).start()
 
 # ================= DELAYED AD SENDER (20 SECONDS) =================
 def send_delayed_ad(user_id, delay_seconds=20):
@@ -125,7 +154,6 @@ def send_delayed_ad(user_id, delay_seconds=20):
                     from_chat_id=src_chat_id,
                     message_id=src_msg_id
                 )
-            # Record it in sent_ads so Admin can delete it later if needed
             cursor.execute("INSERT INTO sent_ads (user_id, message_id) VALUES (?, ?)", (user_id, sent_msg.message_id))
             conn.commit()
     except Exception:
@@ -176,7 +204,6 @@ def start_handler(message):
     user = message.from_user
     register_user(user)
 
-    # Admin Panel
     if user.id == ADMIN_ID:
         bot.send_message(
             ADMIN_ID,
@@ -185,10 +212,9 @@ def start_handler(message):
         )
         return
 
-    # User ke liye 20 second ke delay ke baad active ad bhejne ka background thread
+    # User ke 20s ke baad active ad bhejna
     threading.Thread(target=send_delayed_ad, args=(user.id, 20), daemon=True).start()
 
-    # Normal user file query
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("file_"):
         file_db_id = args[1].replace("file_", "")
@@ -237,7 +263,8 @@ def deliver_file(user_id, file_db_id):
         msg = bot.send_photo(user_id, f_id, caption=caption)
 
     if msg:
-        threading.Thread(target=auto_delete_file, args=(user_id, msg.message_id, 1800), daemon=True).start()
+        # Schedule 30 minutes (1800 seconds) auto-deletion in database
+        schedule_auto_delete(user_id, msg.message_id, 1800)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("check_"))
 def verify_subscription(call):
@@ -320,7 +347,6 @@ def handle_ads_panel(call):
         ads_to_remove = cursor.fetchall()
 
         if not ads_to_remove:
-            # Active ad table bhi clear kar dete hain
             cursor.execute("DELETE FROM active_ad WHERE id = 1")
             conn.commit()
             bot.send_message(ADMIN_ID, "⚠️ No active broadcasted ads found to delete.")
@@ -336,7 +362,6 @@ def handle_ads_panel(call):
             except Exception:
                 pass
 
-        # Clear both sent list and currently active ad
         cursor.execute("DELETE FROM sent_ads")
         cursor.execute("DELETE FROM active_ad WHERE id = 1")
         conn.commit()
@@ -407,11 +432,9 @@ def handle_ad_lifecycle(call):
             except Exception:
                 pass
 
-        # Purana ad record clear karke naya track karte hain
         cursor.execute("DELETE FROM sent_ads")
         cursor.executemany("INSERT INTO sent_ads (user_id, message_id) VALUES (?, ?)", sent_records)
 
-        # Active Ad table me store karte hain taaki naye users ko 20 second bad yahi ad mile
         cursor.execute("""
         INSERT INTO active_ad (id, chat_id, message_id, custom_text) 
         VALUES (1, ?, ?, ?)
