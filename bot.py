@@ -25,8 +25,8 @@ BOT_TOKEN = "8937376122:AAGANyLhdJLZyOZNVr62MaJ-OHxn7Avn6T0"
 ADMIN_ID = 8671410379
 
 CHANNELS = [
-    {"chat_id": -1004447562202, "link": "https://t.me/+cJt33a-UDCw5YmVl", "name": "Join 1"},
-    {"chat_id": -1004374951317, "link": "https://t.me/+HkOcx5kbh01iZTE1", "name": "Join 2"},
+    {"chat_id": -1004447562202, "link": "https://t.me/Ox2MODS", "name": "Join 1"},
+    {"chat_id": -1004374951317, "link": "https://t.me/Ox1MODS", "name": "Join 2"},
     {"chat_id": -1004291249317, "link": "https://t.me/OxRehanCyber", "name": "Join 3"},
     {"chat_id": -1003782903063, "link": "https://t.me/+852hkOgj0UNlZGU9", "name": "Join 4"}
 ]
