@@ -639,4 +639,4 @@ def admin_commands_info(message):
 # ================= RUN BOT =================
 if __name__ == "__main__":
     print("Bot is up and running...")
-    bot.infinity_polling(skip_pending=True):
+    bot.infinity_polling(skip_pending=True)
