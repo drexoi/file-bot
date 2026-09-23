@@ -41,7 +41,9 @@ cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY
+    user_id INTEGER PRIMARY KEY,
+    first_name TEXT,
+    username TEXT
 )
 """)
 
@@ -53,9 +55,30 @@ CREATE TABLE IF NOT EXISTS files (
     file_type TEXT
 )
 """)
+
+# Table to track broadcasted ads so they can be deleted later
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS sent_ads (
+    ad_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    message_id INTEGER
+)
+""")
+
+# Table to store the currently active ad for new/returning users
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS active_ad (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER,
+    message_id INTEGER,
+    custom_text TEXT
+)
+""")
 conn.commit()
 
+# In-memory caches for multi-step admin flows
 upload_cache = {}
+ad_cache = {}
 
 # ================= ADMIN KEYBOARD =================
 def get_admin_keyboard():
@@ -63,13 +86,15 @@ def get_admin_keyboard():
     btn_upload = types.KeyboardButton("📤 Upload File")
     btn_files = types.KeyboardButton("📁 File Library")
     btn_delete = types.KeyboardButton("🗑️ Delete File")
-    btn_users = types.KeyboardButton("👥 Total Users")
     btn_broadcast = types.KeyboardButton("📢 Broadcast")
-    btn_info = types.KeyboardButton("ℹ️ Admin Guide")
+    btn_ads = types.KeyboardButton("📢 Ads System")
+    btn_user_info = types.KeyboardButton("ℹ️ User Info")
+    btn_info = types.KeyboardButton("🛠 Admin Guide")
     
     markup.add(btn_upload, btn_files)
-    markup.add(btn_delete, btn_users)
-    markup.add(btn_broadcast, btn_info)
+    markup.add(btn_delete, btn_broadcast)
+    markup.add(btn_ads, btn_user_info)
+    markup.add(btn_info)
     return markup
 
 # ================= AUTO DELETE FUNCTION =================
@@ -84,9 +109,41 @@ def auto_delete_file(chat_id, message_id, delay_seconds=1800):
     except Exception:
         pass
 
+# ================= DELAYED AD SENDER (20 SECONDS) =================
+def send_delayed_ad(user_id, delay_seconds=20):
+    time.sleep(delay_seconds)
+    try:
+        cursor.execute("SELECT chat_id, message_id, custom_text FROM active_ad WHERE id = 1")
+        active = cursor.fetchone()
+        if active:
+            src_chat_id, src_msg_id, custom_txt = active
+            if custom_txt:
+                sent_msg = bot.send_message(user_id, custom_txt)
+            else:
+                sent_msg = bot.copy_message(
+                    chat_id=user_id,
+                    from_chat_id=src_chat_id,
+                    message_id=src_msg_id
+                )
+            # Record it in sent_ads so Admin can delete it later if needed
+            cursor.execute("INSERT INTO sent_ads (user_id, message_id) VALUES (?, ?)", (user_id, sent_msg.message_id))
+            conn.commit()
+    except Exception:
+        pass
+
 # ================= HELPER FUNCTIONS =================
-def register_user(user_id):
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+def register_user(user):
+    user_id = user.id
+    first_name = user.first_name or "Unknown"
+    username = f"@{user.username}" if user.username else "No Username"
+    
+    cursor.execute("""
+    INSERT INTO users (user_id, first_name, username) 
+    VALUES (?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET 
+        first_name=excluded.first_name,
+        username=excluded.username
+    """, (user_id, first_name, username))
     conn.commit()
 
 def is_subscribed(user_id):
@@ -100,9 +157,7 @@ def is_subscribed(user_id):
     return True
 
 def get_force_sub_markup(file_id=None):
-    # 2 buttons per row side-by-side
     markup = types.InlineKeyboardMarkup(row_width=2)
-    
     b1 = types.InlineKeyboardButton("🔹 Join 1", url=CHANNELS[0]["link"])
     b2 = types.InlineKeyboardButton("🔸 Join 2", url=CHANNELS[1]["link"])
     b3 = types.InlineKeyboardButton("⚡ Join 3", url=CHANNELS[2]["link"])
@@ -118,26 +173,29 @@ def get_force_sub_markup(file_id=None):
 # ================= USER / GENERAL HANDLERS =================
 @bot.message_handler(commands=['start'])
 def start_handler(message):
-    user_id = message.from_user.id
-    register_user(user_id)
+    user = message.from_user
+    register_user(user)
 
-    # Admin verification
-    if user_id == ADMIN_ID:
+    # Admin Panel
+    if user.id == ADMIN_ID:
         bot.send_message(
             ADMIN_ID,
-            "👑 Welcome Boss! Admin Dashboard is active. Manage your tasks using the quick buttons below:",
+            "👑 Welcome Boss! Admin Dashboard is active. Manage your tasks using the buttons below:",
             reply_markup=get_admin_keyboard()
         )
         return
+
+    # User ke liye 20 second ke delay ke baad active ad bhejne ka background thread
+    threading.Thread(target=send_delayed_ad, args=(user.id, 20), daemon=True).start()
 
     # Normal user file query
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("file_"):
         file_db_id = args[1].replace("file_", "")
         
-        if not is_subscribed(user_id):
+        if not is_subscribed(user.id):
             bot.send_message(
-                user_id,
+                user.id,
                 "🔒 **Access Locked!**\n\n"
                 "Please join all our official channels below to unlock and receive your file instantly.\n"
                 "After joining all of them, tap the **Verify & Access File** button.",
@@ -145,10 +203,10 @@ def start_handler(message):
             )
             return
 
-        deliver_file(user_id, file_db_id)
+        deliver_file(user.id, file_db_id)
     else:
         bot.send_message(
-            user_id,
+            user.id,
             "👋 Welcome! Send or click on a valid download link to access your files directly.",
             reply_markup=types.ReplyKeyboardRemove()
         )
@@ -203,15 +261,185 @@ def verify_subscription(call):
             show_alert=True
         )
 
-# ================= ADMIN ACTIONS =================
-@bot.message_handler(func=lambda msg: msg.text in ["👥 Total Users", "/users"])
-def total_users_count(message):
+# ================= ADMIN ACTION: USER INFO =================
+@bot.message_handler(func=lambda msg: msg.text in ["ℹ️ User Info", "/users"])
+def show_users_info(message):
     if message.from_user.id != ADMIN_ID:
         return
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
-    bot.send_message(ADMIN_ID, f"👥 **Total Registered Users:** `{count}`", parse_mode="Markdown")
 
+    cursor.execute("SELECT user_id, first_name, username FROM users")
+    records = cursor.fetchall()
+    total_users = len(records)
+
+    if total_users == 0:
+        bot.send_message(ADMIN_ID, "👥 Total Active Users: `0`\nNo users found in database.")
+        return
+
+    header = f"👥 **Total Active Users:** `{total_users}`\n\n📋 **User List:**\n"
+    current_chunk = header
+
+    for uid, name, uname in records:
+        entry = f"• **ID:** `{uid}` | **Name:** {name} | **User:** {uname}\n"
+        if len(current_chunk) + len(entry) > 4000:
+            bot.send_message(ADMIN_ID, current_chunk, parse_mode="Markdown")
+            current_chunk = entry
+        else:
+            current_chunk += entry
+
+    if current_chunk:
+        bot.send_message(ADMIN_ID, current_chunk, parse_mode="Markdown")
+
+# ================= ADMIN ACTION: ADS SYSTEM =================
+@bot.message_handler(func=lambda msg: msg.text in ["📢 Ads System", "/ads"])
+def ads_menu(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📤 Upload Ad", callback_data="ad_action_upload"),
+        types.InlineKeyboardButton("🗑️ Delete Ad", callback_data="ad_action_delete")
+    )
+    bot.send_message(
+        ADMIN_ID,
+        "📢 **Ads Control Panel**\n\nChoose an action below to post an advertisement or delete the previously posted ad:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data in ["ad_action_upload", "ad_action_delete"])
+def handle_ads_panel(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    if call.data == "ad_action_upload":
+        bot.send_message(ADMIN_ID, "📤 Send your ad content now (Text, Photo, Video, Document, Link, or Audio):")
+        bot.register_next_step_handler(call.message, capture_ad_content)
+
+    elif call.data == "ad_action_delete":
+        cursor.execute("SELECT user_id, message_id FROM sent_ads")
+        ads_to_remove = cursor.fetchall()
+
+        if not ads_to_remove:
+            # Active ad table bhi clear kar dete hain
+            cursor.execute("DELETE FROM active_ad WHERE id = 1")
+            conn.commit()
+            bot.send_message(ADMIN_ID, "⚠️ No active broadcasted ads found to delete.")
+            return
+
+        bot.send_message(ADMIN_ID, f"⏳ Removing ad from {len(ads_to_remove)} user chats...")
+        deleted_count = 0
+
+        for uid, mid in ads_to_remove:
+            try:
+                bot.delete_message(chat_id=uid, message_id=mid)
+                deleted_count += 1
+            except Exception:
+                pass
+
+        # Clear both sent list and currently active ad
+        cursor.execute("DELETE FROM sent_ads")
+        cursor.execute("DELETE FROM active_ad WHERE id = 1")
+        conn.commit()
+        bot.send_message(ADMIN_ID, f"✅ Done! Ad deleted from {deleted_count} active chats and removed from new user queue.")
+
+def capture_ad_content(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    ad_cache[ADMIN_ID] = {
+        "message_id": message.message_id,
+        "chat_id": message.chat.id,
+        "custom_text": None
+    }
+
+    markup = types.InlineKeyboardMarkup(row_width=3)
+    markup.add(
+        types.InlineKeyboardButton("🌐 Publish", callback_data="ad_btn_publish"),
+        types.InlineKeyboardButton("✏️ Edit", callback_data="ad_btn_edit"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="ad_btn_cancel")
+    )
+
+    bot.send_message(
+        ADMIN_ID,
+        "📢 Ad captured successfully! What would you like to do?",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data in ["ad_btn_publish", "ad_btn_edit", "ad_btn_cancel"])
+def handle_ad_lifecycle(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    action = call.data
+    cached = ad_cache.get(ADMIN_ID)
+
+    if action == "ad_btn_cancel":
+        ad_cache.pop(ADMIN_ID, None)
+        bot.edit_message_text("❌ Ad creation cancelled.", ADMIN_ID, call.message.message_id)
+
+    elif action == "ad_btn_edit":
+        msg = bot.send_message(ADMIN_ID, "✏️ Send the modified text/caption for this ad:")
+        bot.register_next_step_handler(msg, edit_ad_text)
+
+    elif action == "ad_btn_publish":
+        if not cached:
+            bot.send_message(ADMIN_ID, "❌ Session expired. Please send your ad again.")
+            return
+
+        cursor.execute("SELECT user_id FROM users")
+        users = cursor.fetchall()
+        bot.send_message(ADMIN_ID, f"🚀 Publishing ad to {len(users)} users...")
+
+        sent_records = []
+        custom_txt = cached.get("custom_text")
+
+        for (uid,) in users:
+            try:
+                if custom_txt:
+                    sent_msg = bot.send_message(uid, custom_txt)
+                else:
+                    sent_msg = bot.copy_message(
+                        chat_id=uid,
+                        from_chat_id=cached["chat_id"],
+                        message_id=cached["message_id"]
+                    )
+                sent_records.append((uid, sent_msg.message_id))
+            except Exception:
+                pass
+
+        # Purana ad record clear karke naya track karte hain
+        cursor.execute("DELETE FROM sent_ads")
+        cursor.executemany("INSERT INTO sent_ads (user_id, message_id) VALUES (?, ?)", sent_records)
+
+        # Active Ad table me store karte hain taaki naye users ko 20 second bad yahi ad mile
+        cursor.execute("""
+        INSERT INTO active_ad (id, chat_id, message_id, custom_text) 
+        VALUES (1, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET 
+            chat_id=excluded.chat_id,
+            message_id=excluded.message_id,
+            custom_text=excluded.custom_text
+        """, (cached["chat_id"], cached["message_id"], custom_txt))
+        
+        conn.commit()
+        ad_cache.pop(ADMIN_ID, None)
+        bot.send_message(ADMIN_ID, f"✅ Ad published to {len(sent_records)} users and set active for all /start users after 20 seconds!")
+
+def edit_ad_text(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if ADMIN_ID in ad_cache:
+        ad_cache[ADMIN_ID]["custom_text"] = message.text
+
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            types.InlineKeyboardButton("🌐 Publish", callback_data="ad_btn_publish"),
+            types.InlineKeyboardButton("✏️ Edit", callback_data="ad_btn_edit"),
+            types.InlineKeyboardButton("❌ Cancel", callback_data="ad_btn_cancel")
+        )
+        bot.send_message(ADMIN_ID, f"Updated Ad Text:\n\n\"{message.text}\"\n\nChoose an action:", reply_markup=markup)
+
+# ================= ADMIN ACTIONS: FILE MANAGEMENT =================
 @bot.message_handler(func=lambda msg: msg.text in ["🗑️ Delete File", "/delete"])
 def prompt_delete_file(message):
     if message.from_user.id != ADMIN_ID:
@@ -360,7 +588,7 @@ def list_files(message):
 
     bot.send_message(ADMIN_ID, text)
 
-# ================= BROADCAST ANY CONTENT (TEXT / MEDIA) =================
+# ================= BROADCAST ANY CONTENT =================
 @bot.message_handler(func=lambda msg: msg.text in ["📢 Broadcast", "/all"])
 def prompt_broadcast(message):
     if message.from_user.id != ADMIN_ID:
@@ -390,23 +618,25 @@ def send_broadcast_all(message):
 
     bot.send_message(ADMIN_ID, f"✅ Broadcast Finished!\n\nSuccessfully Delivered: {sent}\nFailed / Blocked: {failed}")
 
-@bot.message_handler(func=lambda msg: msg.text in ["ℹ️ Admin Guide", "/com"])
+# ================= ADMIN GUIDE =================
+@bot.message_handler(func=lambda msg: msg.text in ["🛠 Admin Guide", "/com"])
 def admin_commands_info(message):
     if message.from_user.id != ADMIN_ID:
         return
     text = (
-        "🛠 Admin Guide & Controls:\n\n"
-        "• 📤 Upload File - Upload any file to generate a 30-min timer direct link.\n"
-        "• 📁 File Library - View all files currently saved with their IDs.\n"
-        "• 🗑️ Delete File - Delete any file permanently from the database.\n"
-        "• 👥 Total Users - Check the total number of users who started the bot.\n"
-        "• 📢 Broadcast - Send text, media, or files to all users.\n"
-        "• ℹ️ Admin Guide - View this instructions panel."
+        "🛠 **Admin Guide & Controls:**\n\n"
+        "• 📤 **Upload File** - Upload any file to generate a 30-min timer direct link.\n"
+        "• 📁 **File Library** - View all files currently saved with their IDs.\n"
+        "• 🗑️ **Delete File** - Delete any file permanently from the database.\n"
+        "• 📢 **Broadcast** - Direct broadcast of media/text to all users.\n"
+        "• 📢 **Ads System** - Upload ads with Publish/Edit/Cancel buttons or Delete active ads.\n"
+        "• ℹ️ **User Info** - View active users count along with User ID, Name, and Username.\n"
+        "• ⏱️ **Auto-Ad** - Active ads are automatically delivered to users 20s after `/start`.\n"
+        "• 🛠 **Admin Guide** - View this instructions panel."
     )
-    bot.send_message(ADMIN_ID, text)
+    bot.send_message(ADMIN_ID, text, parse_mode="Markdown")
 
 # ================= RUN BOT =================
 if __name__ == "__main__":
     print("Bot is up and running...")
-    bot.infinity_polling(skip_pending=True)
-    
+    bot.infinity_polling(skip_pending=True):
