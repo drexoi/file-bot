@@ -21,7 +21,7 @@ def run_server():
 threading.Thread(target=run_server, daemon=True).start()
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = "8937376122:AAEQ_sv61t7hGpCAMoRcCHvRYo1d2sbypBk"
+BOT_TOKEN = "8937376122:AAHU5rK-1sDDXSFSxi-BpiwfG8vTQTqFudE"
 ADMIN_ID = 8671410379
 
 CHANNELS = [
